@@ -48,6 +48,7 @@ sys.path.append(os.getcwd())
 
 COMPILER=0
 INSTALLER=0
+WHEEL=0
 GENMAN=0
 COMPRESSOR="zlib"
 THREADCOUNT=0
@@ -59,6 +60,7 @@ RUNTIME=0
 DISTRIBUTOR=""
 VERSION=None
 DEBVERSION=None
+WHLVERSION=None
 RPMRELEASE="1"
 P3DSUFFIX=None
 MAJOR_VERSION=None
@@ -130,6 +132,7 @@ def usage(problem):
     print("  --verbose         (print out more information)")
     print("  --runtime         (build a runtime build instead of an SDK build)")
     print("  --installer       (build an installer)")
+    print("  --wheel           (build a pip-installable .whl)")
     print("  --optimize X      (optimization level can be 1,2,3,4)")
     print("  --version X       (set the panda version number)")
     print("  --lzma            (use lzma compression when building Windows installer)")
@@ -161,13 +164,13 @@ def usage(problem):
     os._exit(1)
 
 def parseopts(args):
-    global INSTALLER,RTDIST,RUNTIME,GENMAN,DISTRIBUTOR,VERSION
+    global INSTALLER,WHEEL,RTDIST,RUNTIME,GENMAN,DISTRIBUTOR,VERSION
     global COMPRESSOR,THREADCOUNT,OSXTARGET,UNIVERSAL,HOST_URL
-    global DEBVERSION,RPMRELEASE,P3DSUFFIX
+    global DEBVERSION,WHLVERSION,RPMRELEASE,P3DSUFFIX
     global STRDXSDKVERSION, STRMSPLATFORMVERSION, BOOUSEINTELCOMPILER
     longopts = [
         "help","distributor=","verbose","runtime","osxtarget=",
-        "optimize=","everything","nothing","installer","rtdist","nocolor",
+        "optimize=","everything","nothing","installer","wheel","rtdist","nocolor",
         "version=","lzma","no-python","threads=","outputdir=","override=",
         "static","host=","debversion=","rpmrelease=","p3dsuffix=",
         "directx-sdk=", "platform-sdk=", "use-icl",
@@ -184,6 +187,7 @@ def parseopts(args):
             if (option=="--help"): raise Exception
             elif (option=="--optimize"): optimize=value
             elif (option=="--installer"): INSTALLER=1
+            elif (option=="--wheel"): WHEEL=1
             elif (option=="--verbose"): SetVerbose(True)
             elif (option=="--distributor"): DISTRIBUTOR=value
             elif (option=="--rtdist"): RTDIST=1
@@ -199,8 +203,11 @@ def parseopts(args):
             elif (option=="--arch"): target_arch = value.strip()
             elif (option=="--nocolor"): DisableColors()
             elif (option=="--version"):
-                VERSION=value
-                if (len(VERSION.split(".")) != 3): raise Exception
+                match = re.match(r'^\d+\.\d+\.\d+', value)
+                if not match:
+                    usage("version requires three digits")
+                WHLVERSION = value
+                VERSION = match.group()
             elif (option=="--lzma"): COMPRESSOR="lzma"
             elif (option=="--override"): AddOverride(value.strip())
             elif (option=="--static"): SetLinkAllStatic(True)
@@ -310,6 +317,11 @@ if (VERSION is None):
         VERSION = ParsePandaVersion("dtool/PandaVersion.pp")
         PLUGIN_VERSION = ParsePluginVersion("dtool/PandaVersion.pp")
 
+if WHLVERSION is None:
+    WHLVERSION = VERSION
+
+print("Version: %s" % VERSION)
+
 if (COREAPI_VERSION is None):
     COREAPI_VERSION = VERSION
 
@@ -364,8 +376,17 @@ if (GetHost() == 'windows'):
 if (INSTALLER and RTDIST):
     exit("Cannot build an installer for the rtdist build!")
 
+if (WHEEL and RUNTIME):
+    exit("Cannot build a wheel for the runtime build!")
+
+if (WHEEL and RTDIST):
+    exit("Cannot build a wheel for the rtdist build!")
+
 if (INSTALLER) and (PkgSkip("PYTHON")) and (not RUNTIME):
     exit("Cannot build installer without python")
+
+if WHEEL and PkgSkip("PYTHON"):
+    exit("Cannot build wheel without Python")
 
 if (RTDIST) and (PkgSkip("JPEG")):
     exit("Cannot build rtdist without jpeg")
@@ -2442,6 +2463,95 @@ if (PkgSkip("DIRECT")==0):
         os.remove(GetOutputDir() + '/direct/ffi/panda3d.py')
     if os.path.isfile(GetOutputDir() + '/direct/ffi/panda3d.pyc'):
         os.remove(GetOutputDir() + '/direct/ffi/panda3d.pyc')
+
+# These files used to exist; remove them to avoid conflicts.
+del_files = ['core.py', 'core.pyc', 'core.pyo',
+             '_core.pyd', '_core.so',
+             'direct.py', 'direct.pyc', 'direct.pyo',
+             '_direct.pyd', '_direct.so',
+             'dtoolconfig.pyd', 'dtoolconfig.so']
+
+for basename in del_files:
+    path = os.path.join(GetOutputDir(), 'panda3d', basename)
+    if os.path.isfile(path):
+        print("Removing %s" % (path))
+        os.remove(path)
+
+# Write an appropriate panda3d/__init__.py
+p3d_init = """"Python bindings for the Panda3D libraries"
+__version__ = '%s'
+""" % (WHLVERSION)
+
+if GetTarget() == 'windows':
+    p3d_init += """
+import os
+bindir = os.path.join(os.path.dirname(__file__), '..', 'bin')
+if os.path.isdir(bindir):
+    if not os.environ.get('PATH'):
+        os.environ['PATH'] = bindir
+    else:
+        os.environ['PATH'] = bindir + os.pathsep + os.environ['PATH']
+del os, bindir
+"""
+
+if not PkgSkip("PYTHON"):
+    ConditionalWriteFile(GetOutputDir() + '/panda3d/__init__.py', p3d_init)
+
+    # Also add this file, for backward compatibility.
+    ConditionalWriteFile(GetOutputDir() + '/panda3d/dtoolconfig.py', """
+if __debug__:
+    print("Warning: panda3d.dtoolconfig is deprecated, use panda3d.interrogatedb instead.")
+from .interrogatedb import *
+""")
+
+# PandaModules is now deprecated; generate a shim for backward compatibility.
+for fn in glob.glob(GetOutputDir() + '/pandac/*.py') + glob.glob(GetOutputDir() + '/pandac/*.py[co]'):
+    if os.path.basename(fn) not in ('PandaModules.py', '__init__.py'):
+        os.remove(fn)
+
+panda_modules = ['core']
+if not PkgSkip("PANDAPHYSICS"):
+    panda_modules.append('physics')
+if not PkgSkip('PANDAFX'):
+    panda_modules.append('fx')
+if not PkgSkip("DIRECT"):
+    panda_modules.append('direct')
+if not PkgSkip("VISION"):
+    panda_modules.append('vision')
+if not PkgSkip("SKEL"):
+    panda_modules.append('skel')
+#if not PkgSkip("EGG"):
+#    panda_modules.append('egg')
+if not PkgSkip("AWESOMIUM"):
+    panda_modules.append('awesomium')
+if not PkgSkip("ODE"):
+    panda_modules.append('ode')
+if not PkgSkip("VRPN"):
+    panda_modules.append('vrpn')
+
+panda_modules_code = """
+"This module is deprecated.  Import from panda3d.core and other panda3d.* modules instead."
+if __debug__:
+    print("Warning: pandac.PandaModules is deprecated, import from panda3d.core instead")
+"""
+
+for module in panda_modules:
+    panda_modules_code += """
+try:
+    from panda3d.%s import *
+except ImportError as err:
+    if "No module named %s" not in str(err):
+        raise""" % (module, module)
+
+exthelpers_code = """
+"This module is deprecated.  Import from direct.extensions_native.extension_native_helpers instead."
+from direct.extensions_native.extension_native_helpers import *
+"""
+
+if not PkgSkip("PYTHON"):
+    ConditionalWriteFile(GetOutputDir() + '/pandac/PandaModules.py', panda_modules_code)
+    ConditionalWriteFile(GetOutputDir() + '/pandac/extension_native_helpers.py', exthelpers_code)
+    ConditionalWriteFile(GetOutputDir() + '/pandac/__init__.py', '')
 
 ##########################################################################################
 #
@@ -6570,31 +6680,37 @@ def MakeInstallerFreeBSD():
     cmd += " -d pkg-descr -f pkg-plist panda3d-%s" % VERSION
     oscmd(cmd)
 
-if (INSTALLER != 0):
-    ProgressOutput(100.0, "Building installer")
-    target = GetTarget()
-    if (target == 'windows'):
-        dbg = ""
-        if (GetOptimize() <= 2): dbg = "-dbg"
-        if GetTargetArch() == 'x64':
-            if (RUNTIME):
-                MakeInstallerNSIS("Panda3D-Runtime-"+VERSION+dbg+"-x64.exe", "Panda3D", "Panda3D "+VERSION, "C:\\Panda3D-"+VERSION+"-x64")
+try:
+    if INSTALLER:
+        ProgressOutput(100.0, "Building installer")
+        target = GetTarget()
+        if (target == 'windows'):
+            dbg = ""
+            if (GetOptimize() <= 2): dbg = "-dbg"
+            if GetTargetArch() == 'x64':
+                if (RUNTIME):
+                    MakeInstallerNSIS("Panda3D-Runtime-"+VERSION+dbg+"-x64.exe", "Panda3D", "Panda3D "+VERSION, "C:\\Panda3D-"+VERSION+"-x64")
+                else:
+                    MakeInstallerNSIS("Panda3D-"+VERSION+dbg+"-x64.exe", "Panda3D", "Panda3D "+VERSION, "C:\\Panda3D-"+VERSION+"-x64")
             else:
-                MakeInstallerNSIS("Panda3D-"+VERSION+dbg+"-x64.exe", "Panda3D", "Panda3D "+VERSION, "C:\\Panda3D-"+VERSION+"-x64")
+                if (RUNTIME):
+                    MakeInstallerNSIS("Panda3D-Runtime-"+VERSION+dbg+".exe", "Panda3D", "Panda3D "+VERSION, "C:\\Panda3D-"+VERSION)
+                else:
+                    MakeInstallerNSIS("Panda3D-"+VERSION+dbg+".exe", "Panda3D", "Panda3D "+VERSION, "C:\\Panda3D-"+VERSION)
+        elif (target == 'linux'):
+            MakeInstallerLinux()
+        elif (target == 'darwin'):
+            MakeInstallerOSX()
+        elif (target == 'freebsd'):
+            MakeInstallerFreeBSD()
         else:
-            if (RUNTIME):
-                MakeInstallerNSIS("Panda3D-Runtime-"+VERSION+dbg+".exe", "Panda3D", "Panda3D "+VERSION, "C:\\Panda3D-"+VERSION)
-            else:
-                MakeInstallerNSIS("Panda3D-"+VERSION+dbg+".exe", "Panda3D", "Panda3D "+VERSION, "C:\\Panda3D-"+VERSION)
-    elif (target == 'linux'):
-        MakeInstallerLinux()
-    elif (target == 'darwin'):
-        MakeInstallerOSX()
-    elif (target == 'freebsd'):
-        MakeInstallerFreeBSD()
-    else:
-        exit("Do not know how to make an installer for this platform")
-
+            exit("Do not know how to make an installer for this platform")
+    if WHEEL:
+            ProgressOutput(100.0, "Building wheel")
+            from makewheel import makewheel
+            makewheel(WHLVERSION, GetOutputDir())
+finally:
+    SaveDependencyCache()
 ##########################################################################################
 #
 # Print final status report.

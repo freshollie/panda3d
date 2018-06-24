@@ -15,9 +15,11 @@ from distutils import sysconfig
 if sys.version_info >= (3, 0):
     import pickle
     import _thread as thread
+    import configparser
 else:
     import cPickle as pickle
     import thread
+    import ConfigParser as configparser
 
 SUFFIX_INC = [".cxx",".c",".h",".I",".yxx",".lxx",".mm",".rc",".r"]
 SUFFIX_DLL = [".dll",".dlo",".dle",".dli",".dlm",".mll",".exe",".pyd",".ocx"]
@@ -2497,6 +2499,21 @@ def CopyPythonTree(dstdir, srcdir, lib2to3_fixers=[]):
 ##
 ########################################################################
 
+cfg_parser = None
+
+def GetMetadataValue(key):
+    global cfg_parser
+    if not cfg_parser:
+        # Parse the metadata from the setup.cfg file.
+        cfg_parser = configparser.ConfigParser()
+        path = os.path.join(os.path.dirname(__file__), '..', 'setup.cfg')
+        assert cfg_parser.read(path), "Could not read setup.cfg file."
+
+    value = cfg_parser.get('metadata', key)
+    if key == 'classifiers':
+        value = value.strip().split('\n')
+    return value
+
 def ParsePandaVersion(fn):
     try:
         f = open(fn, "r")
@@ -2619,6 +2636,17 @@ def GetOrigExt(x):
 
 def SetOrigExt(x, v):
     ORIG_EXT[x] = v
+
+def GetExtensionSuffix():
+    if sys.version_info >= (3, 0):
+        suffix = sysconfig.get_config_var('EXT_SUFFIX')
+        if suffix:
+            return suffix
+    target = GetTarget()
+    if target == 'windows':
+        return '.pyd'
+    else:
+        return '.so'
 
 def CalcLocation(fn, ipath):
     if (fn.count("/")): return fn
